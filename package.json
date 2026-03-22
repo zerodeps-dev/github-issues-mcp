@@ -1,0 +1,15 @@
+{
+  "name": "github-issues-mcp",
+  "version": "1.0.0",
+  "description": "Zero-dependency MCP server connecting Claude to GitHub Issues with OAuth 2.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["mcp", "github", "issues", "claude", "zero-dependencies", "oauth"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
