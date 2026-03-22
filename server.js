@@ -22,6 +22,8 @@ const CONFIG = {
   baseUrl: process.env.MCP_BASE_URL || 'http://localhost:3232',
   githubToken: process.env.GITHUB_TOKEN || '',
   adminSecret: process.env.MCP_ADMIN_SECRET || '',
+  // Static API key for CLI clients that can't do browser OAuth
+  staticApiKey: process.env.MCP_STATIC_API_KEY || '',
 };
 
 // ── OAuth 2.0 State ─────────────────────────────────────────────────────────
@@ -584,16 +586,26 @@ const server = createServer(async (req, res) => {
       return sendJson(res, { status: 'ok', version: '1.0.0' });
     }
 
-    // ── MCP Endpoint (requires Bearer token) ────────────────────────
+    // ── MCP Endpoint (requires Bearer token or static API key) ──────
     if (pathname === '/mcp' && req.method === 'POST') {
       const auth = req.headers.authorization;
-      if (!auth || !auth.startsWith('Bearer ')) {
-        res.writeHead(401, { ...CORS, 'WWW-Authenticate': 'Bearer' });
-        return res.end();
+      let authorized = false;
+
+      if (auth && auth.startsWith('Bearer ')) {
+        const token = auth.slice(7);
+        // Check static API key first
+        if (CONFIG.staticApiKey && token === CONFIG.staticApiKey) {
+          authorized = true;
+        } else {
+          // Check OAuth tokens
+          const tokenEntry = accessTokens.get(token);
+          if (tokenEntry && Date.now() <= tokenEntry.expiresAt) {
+            authorized = true;
+          }
+        }
       }
-      const token = auth.slice(7);
-      const tokenEntry = accessTokens.get(token);
-      if (!tokenEntry || Date.now() > tokenEntry.expiresAt) {
+
+      if (!authorized) {
         res.writeHead(401, { ...CORS, 'WWW-Authenticate': 'Bearer' });
         return res.end();
       }
