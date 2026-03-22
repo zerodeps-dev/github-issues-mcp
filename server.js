@@ -58,6 +58,23 @@ async function ghApi(method, path, body = null) {
   return data;
 }
 
+// ── GitHub GraphQL API ──────────────────────────────────────────────────────
+
+async function ghGraphQL(query, variables = {}) {
+  const res = await fetch('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + CONFIG.githubToken,
+      'Content-Type': 'application/json',
+      'User-Agent': 'github-issues-mcp/1.0',
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  const data = await res.json();
+  if (data.errors) throw new Error(data.errors.map(e => e.message).join(', '));
+  return data.data;
+}
+
 // ── MCP Tools ───────────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -146,6 +163,58 @@ const TOOLS = [
       required: ['owner', 'repo'],
     },
   },
+  {
+    name: 'get_project',
+    description: 'Get a GitHub Project board with its status columns and field IDs',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        owner: { type: 'string', description: 'Project owner (user or org)' },
+        project_number: { type: 'number', description: 'Project number' },
+        owner_type: { type: 'string', enum: ['user', 'organization'], default: 'user', description: 'Whether owner is a user or org' },
+      },
+      required: ['owner', 'project_number'],
+    },
+  },
+  {
+    name: 'list_project_items',
+    description: 'List all items in a GitHub Project with their status/column',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project node ID (from get_project)' },
+      },
+      required: ['project_id'],
+    },
+  },
+  {
+    name: 'add_to_project',
+    description: 'Add an issue to a GitHub Project board',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project node ID' },
+        issue_owner: { type: 'string', description: 'Repository owner' },
+        issue_repo: { type: 'string', description: 'Repository name' },
+        issue_number: { type: 'number', description: 'Issue number' },
+      },
+      required: ['project_id', 'issue_owner', 'issue_repo', 'issue_number'],
+    },
+  },
+  {
+    name: 'move_project_item',
+    description: 'Move a project item to a different status column (e.g., Todo, In Progress, Done)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project node ID' },
+        item_id: { type: 'string', description: 'Project item node ID (from list_project_items)' },
+        field_id: { type: 'string', description: 'Status field node ID (from get_project)' },
+        option_id: { type: 'string', description: 'Status option ID for the target column (from get_project)' },
+      },
+      required: ['project_id', 'item_id', 'field_id', 'option_id'],
+    },
+  },
 ];
 
 async function executeTool(name, args) {
@@ -192,6 +261,80 @@ async function executeTool(name, args) {
     case 'list_labels': {
       const labels = await ghApi('GET', '/repos/' + args.owner + '/' + args.repo + '/labels?per_page=100');
       return labels.map(l => ({ name: l.name, color: l.color, description: l.description }));
+    }
+    case 'get_project': {
+      const ownerType = args.owner_type || 'user';
+      const query = 'query($login: String!, $number: Int!) { '
+        + ownerType + '(login: $login) { projectV2(number: $number) { '
+        + 'id title url '
+        + 'fields(first: 30) { nodes { '
+        + '... on ProjectV2FieldCommon { id name } '
+        + '... on ProjectV2SingleSelectField { id name options { id name } } '
+        + '} } } } }';
+      const data = await ghGraphQL(query, { login: args.owner, number: args.project_number });
+      const project = data[ownerType]?.projectV2;
+      if (!project) throw new Error('Project not found');
+      return {
+        id: project.id,
+        title: project.title,
+        url: project.url,
+        fields: project.fields.nodes.filter(f => f.id).map(f => ({
+          id: f.id, name: f.name,
+          options: f.options || undefined,
+        })),
+      };
+    }
+    case 'list_project_items': {
+      const query = 'query($id: ID!) { node(id: $id) { ... on ProjectV2 { '
+        + 'items(first: 100) { nodes { id '
+        + 'fieldValues(first: 10) { nodes { '
+        + '... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } '
+        + '... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } '
+        + '} } '
+        + 'content { ... on Issue { number title state labels(first: 10) { nodes { name } } url } '
+        + '... on PullRequest { number title state url } } '
+        + '} } } } }';
+      const data = await ghGraphQL(query, { id: args.project_id });
+      const items = data.node?.items?.nodes || [];
+      return items.map(item => {
+        const status = item.fieldValues.nodes.find(fv => fv.field?.name === 'Status');
+        return {
+          item_id: item.id,
+          status: status?.name || 'No Status',
+          content: item.content ? {
+            number: item.content.number,
+            title: item.content.title,
+            state: item.content.state,
+            labels: item.content.labels?.nodes?.map(l => l.name) || [],
+            url: item.content.url,
+          } : null,
+        };
+      });
+    }
+    case 'add_to_project': {
+      // First get the issue's node ID
+      const issueData = await ghGraphQL(
+        'query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { issue(number: $number) { id } } }',
+        { owner: args.issue_owner, repo: args.issue_repo, number: args.issue_number }
+      );
+      const contentId = issueData.repository?.issue?.id;
+      if (!contentId) throw new Error('Issue not found');
+
+      const mutation = 'mutation($projectId: ID!, $contentId: ID!) { addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) { item { id } } }';
+      const result = await ghGraphQL(mutation, { projectId: args.project_id, contentId });
+      return { item_id: result.addProjectV2ItemById.item.id };
+    }
+    case 'move_project_item': {
+      const mutation = 'mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) { '
+        + 'updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, '
+        + 'value: { singleSelectOptionId: $optionId } }) { projectV2Item { id } } }';
+      const result = await ghGraphQL(mutation, {
+        projectId: args.project_id,
+        itemId: args.item_id,
+        fieldId: args.field_id,
+        optionId: args.option_id,
+      });
+      return { success: true, item_id: result.updateProjectV2ItemFieldValue.projectV2Item.id };
     }
     default:
       throw new Error('Unknown tool: ' + name);
