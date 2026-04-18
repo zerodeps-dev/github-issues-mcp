@@ -269,9 +269,10 @@ async function executeTool(name, args) {
       const query = 'query($login: String!, $number: Int!) { '
         + ownerType + '(login: $login) { projectV2(number: $number) { '
         + 'id title url '
-        + 'fields(first: 30) { nodes { '
+        + 'fields(first: 50) { nodes { '
         + '... on ProjectV2FieldCommon { id name } '
         + '... on ProjectV2SingleSelectField { id name options { id name } } '
+        + '... on ProjectV2IterationField { id name } '
         + '} } } } }';
       const data = await ghGraphQL(query, { login: args.owner, number: args.project_number });
       const project = data[ownerType]?.projectV2;
@@ -299,10 +300,16 @@ async function executeTool(name, args) {
       const data = await ghGraphQL(query, { id: args.project_id });
       const items = data.node?.items?.nodes || [];
       return items.map(item => {
-        const status = item.fieldValues.nodes.find(fv => fv.field?.name === 'Status');
+        const fields = {};
+        for (const fv of item.fieldValues.nodes) {
+          if (fv.field?.name) {
+            fields[fv.field.name] = fv.name || fv.text || null;
+          }
+        }
         return {
           item_id: item.id,
-          status: status?.name || 'No Status',
+          status: fields['Status'] || 'No Status',
+          fields,
           content: item.content ? {
             number: item.content.number,
             title: item.content.title,
